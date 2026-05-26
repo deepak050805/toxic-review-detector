@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Moderation Engine - AI Content Guard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.js"></script>
+</head>
+<body>
+    <div class="background-grid"></div>
+    <div class="radial-glow"></div>
+
+    <!-- Minimal, product-focused header -->
+    <header class="app-header">
+        <div class="header-container">
+            <div class="app-logo">
+                <span class="logo-dot"></span>
+                <span class="logo-text">Guard.AI</span>
+            </div>
+            <div class="app-tag">
+                <span class="badge badge-outline">v1.2.0-stable</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="container">
+        <!-- Moderation Title and Description -->
+        <section class="engine-title-section">
+            <h1 class="engine-title">Review Moderation Engine</h1>
+            <p class="engine-subtitle">Evaluate toxicity, harassment, profanity, and sentiment in real-time using transformer models.</p>
+        </section>
+
+        <!-- Main Moderation Input Panel -->
+        <section class="analyzer-section">
+            <div class="analyzer-card">
+                <div class="analyzer-form">
+                    <div class="input-group">
+                        <div class="input-header">
+                            <label for="review-input" class="input-label">Content Payload</label>
+                            <span class="char-count">0 characters</span>
+                        </div>
+                        <textarea
+                            id="review-input"
+                            class="review-textarea"
+                            placeholder="Paste review, article, thread, or comment text for moderation analysis..."
+                            rows="10"
+                        ></textarea>
+                    </div>
+
+                    <div class="form-actions">
+                        <div class="example-container">
+                            <span class="example-label">Try example:</span>
+                            <div class="example-buttons">
+                                <button class="example-btn" data-example="1">Clean Review</button>
+                                <button class="example-btn" data-example="2">Constructive criticism</button>
+                                <button class="example-btn" data-example="3">Violent toxicity</button>
+                            </div>
+                        </div>
+                        <div class="button-group">
+                            <button id="clear-btn" class="btn btn-secondary">Clear</button>
+                            <button id="analyze-btn" class="btn btn-primary" disabled>
+                                <span class="btn-text">Analyze Content</span>
+                                <span class="btn-icon">→</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div id="loading-state" class="loading-state hidden">
+                    <div class="loader-container">
+                        <div class="loader-circle"></div>
+                        <div class="loader-pulse"></div>
+                    </div>
+                    <p class="loading-text">Performing neural network analysis...</p>
+                </div>
+
+                <div id="error-state" class="error-state hidden">
+                    <div class="error-content">
+                        <span class="error-icon">⚠</span>
+                        <p id="error-message"></p>
+                    </div>
+                    <button class="error-close" onclick="hideError()">×</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- Redesigned Results Section -->
+        <section id="results-section" class="results-section hidden">
+            <div class="dashboard-grid">
+                
+                <!-- Card 1: Overview Summary Card -->
+                <div class="result-card overview-card">
+                    <div class="card-header">
+                        <h3>Moderation Summary</h3>
+                        <div class="badges-row">
+                            <span id="result-label" class="badge">Safe</span>
+                            <span id="sentiment-badge" class="badge">Neutral</span>
+                        </div>
+                    </div>
+
+                    <div class="summary-body">
+                        <!-- Circular progress gauge -->
+                        <div class="confidence-gauge-container">
+                            <div class="confidence-gauge">
+                                <svg class="circular-progress" viewBox="0 0 200 200">
+                                    <circle class="progress-bg" cx="100" cy="100" r="85"></circle>
+                                    <circle id="progress-circle" class="progress-fill" cx="100" cy="100" r="85"></circle>
+                                </svg>
+                                <div class="gauge-text">
+                                    <span id="confidence-score" class="confidence-value">0%</span>
+                                    <span class="confidence-label">Risk Level</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Technical stats -->
+                        <div class="confidence-info">
+                            <div class="info-item">
+                                <span class="info-label">Compliance Status</span>
+                                <span id="info-status" class="info-value">No action required</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Risk Classification</span>
+                                <span id="info-risk" class="info-value">Minimal</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Sentiment Quality</span>
+                                <span id="sentiment-score-info" class="info-value">Positive (95%)</span>
+                            </div>
+                            <div class="info-item">
+                                <span class="info-label">Latency</span>
+                                <span id="info-time" class="info-value">0ms</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Card 2: Categories Card Grid -->
+                <div class="result-card categories-card">
+                    <div class="card-header">
+                        <h3>Model Signals</h3>
+                        <span class="card-hint">Individual class probability breakdown</span>
+                    </div>
+                    
+                    <div class="categories-list">
+                        <!-- Toxicity Category -->
+                        <div class="category-item">
+                            <div class="category-meta">
+                                <span class="category-name">Toxicity</span>
+                                <span id="toxicity-score" class="category-percentage">0%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div id="toxicity-bar" class="progress-fill" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Hate Speech Category -->
+                        <div class="category-item">
+                            <div class="category-meta">
+                                <span class="category-name">Hate Speech</span>
+                                <span id="hate-speech-score" class="category-percentage">0%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div id="hate-speech-bar" class="progress-fill" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Harassment Category -->
+                        <div class="category-item">
+                            <div class="category-meta">
+                                <span class="category-name">Harassment / Insults</span>
+                                <span id="harassment-score" class="category-percentage">0%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div id="harassment-bar" class="progress-fill" style="width: 0%"></div>
+                            </div>
+                        </div>
+
+                        <!-- Profanity Category -->
+                        <div class="category-item">
+                            <div class="category-meta">
+                                <span class="category-name">Profanity / Obscenity</span>
+                                <span id="profanity-score" class="category-percentage">0%</span>
+                            </div>
+                            <div class="progress-bar">
+                                <div id="profanity-bar" class="progress-fill" style="width: 0%"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visualization Row -->
+            <div class="charts-row">
+                <div class="chart-card">
+                    <h4 class="chart-title">Probability Spectrum</h4>
+                    <div class="chart-wrapper">
+                        <canvas id="categoryChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="chart-card">
+                    <h4 class="chart-title">Sentiment Breakdown</h4>
+                    <div class="chart-wrapper">
+                        <canvas id="riskChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Post-analysis Actions -->
+            <div class="action-buttons-row">
+                <button id="new-analysis-btn" class="btn btn-secondary">Run New Review</button>
+                <button id="download-report-btn" class="btn btn-primary-light">Export Audit Log</button>
+            </div>
+        </section>
+    </main>
+
+    <footer class="app-footer-bar">
+        <div class="footer-container">
+            <p>&copy; 2026 Guard.AI Moderation Engine. All inference is processed locally.</p>
+            <div class="footer-links">
+                <a href="#" class="footer-link">Dashboard</a>
+                <a href="#" class="footer-link">Status</a>
+                <a href="#" class="footer-link">GitHub</a>
+            </div>
+        </div>
+    </footer>
+
+    <script src="{{ url_for('static', filename='js/script.js') }}?v={{ asset_version }}"></script>
+</body>
+</html>

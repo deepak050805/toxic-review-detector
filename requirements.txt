@@ -1,0 +1,12 @@
+# Web API and server runtime
+Flask==2.3.3
+gunicorn==21.2.0
+
+# Transformer inference stack
+torch==2.0.1
+transformers==4.33.0
+numpy==1.24.3
+
+# Environment and HTTP utilities
+requests==2.31.0
+python-dotenv==1.0.0
