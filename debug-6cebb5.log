@@ -1,0 +1,10 @@
+{"sessionId": "6cebb5", "hypothesisId": "H4", "location": "app.py:_log_event", "message": "model_warmup_started", "data": {"event": "model_warmup_started"}, "timestamp": 1779789310817, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H4", "location": "app.py:_log_event", "message": "model_warmup_completed", "data": {"event": "model_warmup_completed", "models_ready": true}, "timestamp": 1779789316841, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H2", "location": "app.py:predict", "message": "predict_entered", "data": {"path": "/api/predict"}, "timestamp": 1779789317918, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H2", "location": "app.py:_log_event", "message": "inference_started", "data": {"event": "inference_started", "text_len": 38}, "timestamp": 1779789317927, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H2", "location": "app.py:_log_event", "message": "inference_completed", "data": {"event": "inference_completed", "toxicity_label": "Toxic", "sentiment_label": "Negative"}, "timestamp": 1779789322899, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H4", "location": "app.py:_log_event", "message": "model_warmup_started", "data": {"event": "model_warmup_started"}, "timestamp": 1779789513375, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H4", "location": "app.py:_log_event", "message": "model_warmup_completed", "data": {"event": "model_warmup_completed", "models_ready": true}, "timestamp": 1779789516384, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H2", "location": "app.py:predict", "message": "predict_entered", "data": {"path": "/api/predict"}, "timestamp": 1779789536886, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H2", "location": "app.py:_log_event", "message": "inference_started", "data": {"event": "inference_started", "text_len": 228}, "timestamp": 1779789536900, "runId": "run1"}
+{"sessionId": "6cebb5", "hypothesisId": "H2", "location": "app.py:_log_event", "message": "inference_completed", "data": {"event": "inference_completed", "toxicity_label": "Clean", "sentiment_label": "Positive"}, "timestamp": 1779789539398, "runId": "run1"}

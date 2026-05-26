@@ -19,7 +19,7 @@ from transformers import pipeline
 logger = logging.getLogger(__name__)
 
 # Public multilabel Jigsaw classifier (toxic, obscene, insult, identity_hate, ...).
-TOXICITY_MODEL_ID = "unitary/toxic-bert"
+TOXICITY_MODEL_ID = "martin-ha/toxic-comment-model"
 SENTIMENT_MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
 
 MAX_INFERENCE_CHARS = 512
@@ -138,7 +138,7 @@ class ToxicityModelLoader:
             "model": model_id,
             "tokenizer": model_id,
             "device": -1,
-            "top_k": None,
+            "top_k": 4,
             "model_kwargs": hub_kwargs,
         }
         if label == "Toxicity":
