@@ -12,16 +12,12 @@ import traceback
 from pathlib import Path
 
 import torch
-from transformers import (
-    AutoModelForSequenceClassification,
-    AutoTokenizer,
-    pipeline,
-)
+from transformers import pipeline
 
 logger = logging.getLogger(__name__)
 
-TOXICITY_MODEL_ID = "unitary/toxic-bert"
-SENTIMENT_MODEL_ID = "lxyuan/distilbert-base-multilingual-cased-sentiments-student"
+TOXICITY_MODEL_ID = "martin-ha/toxic-comment-model"
+SENTIMENT_MODEL_ID = "lxyuan/distilbert-base-uncased-finetuned-sst-2-english"
 
 
 class ModelLoadError(RuntimeError):
@@ -78,10 +74,10 @@ class ToxicityModelLoader:
             "models": {},
             "load_error": None,
         }
-        self._load_models()
+        logger.info("Lazy loading enabled for transformer pipelines")
 
     def _load_pipeline(self, label, model_id):
-        """Load tokenizer, model, and pipeline with detailed startup logging."""
+        """Load a lightweight pipeline directly from model_id with detailed startup logging."""
         local_files_only = should_use_local_files(model_id)
         self.status["models"][label] = {
             "model_id": model_id,
@@ -89,45 +85,41 @@ class ToxicityModelLoader:
             "loaded": False,
         }
 
-        logger.info("[%s] Device selected: %s", label, self.status["device"])
+        logger.info("[%s] Device selected: cpu (forced for low-memory deployment)", label)
         logger.info("[%s] Hugging Face cache path: %s", label, self.status["cache_path"])
         logger.info("[%s] Loading model: %s", label, model_id)
         logger.info("[%s] Local cache available: %s", label, model_cache_exists(model_id))
         logger.info("[%s] local_files_only=%s", label, local_files_only)
 
         try:
-            logger.info("[%s] Loading tokenizer...", label)
-            tokenizer = AutoTokenizer.from_pretrained(
-                model_id,
-                local_files_only=local_files_only,
-            )
-            logger.info("[%s] Tokenizer loaded successfully", label)
+            logger.info("[%s] Initializing lightweight pipeline...", label)
 
-            logger.info("[%s] Loading sequence classification model...", label)
-            model = AutoModelForSequenceClassification.from_pretrained(
-                model_id,
-                local_files_only=local_files_only,
-            )
-            logger.info("[%s] Model loaded successfully", label)
-
-            logger.info("[%s] Initializing text-classification pipeline...", label)
             inference_pipeline = pipeline(
                 "text-classification",
-                model=model,
-                tokenizer=tokenizer,
-                device=0 if torch.cuda.is_available() else -1,
+                model=model_id,
+                device=-1,
                 top_k=None,
             )
+
             logger.info("[%s] Pipeline initialized successfully", label)
 
             self.status["models"][label]["loaded"] = True
+
             return inference_pipeline
 
         except Exception as exc:
             self.status["models"][label]["error"] = str(exc)
             self.status["load_error"] = f"{label} failed: {exc}"
-            logger.exception("[%s] Failed to initialize pipeline for %s", label, model_id)
-            raise ModelLoadError(f"{label} model failed to load: {exc}") from exc
+
+            logger.exception(
+                "[%s] Failed to initialize pipeline for %s",
+                label,
+                model_id,
+            )
+
+            raise ModelLoadError(
+                f"{label} model failed to load: {exc}"
+            ) from exc
 
     def _load_models(self):
         """Load all required pretrained text-classification pipelines."""
@@ -143,6 +135,12 @@ class ToxicityModelLoader:
 
     def predict_toxicity(self, text):
         """Return the primary toxicity label and score on a 0-100 scale."""
+        if self.toxicity_model is None:
+            self.toxicity_model = self._load_pipeline(
+                "Toxicity",
+                TOXICITY_MODEL_ID,
+            )
+
         if not text or len(text.strip()) == 0:
             return {"label": "Clean", "score": 0.0}
 
@@ -154,7 +152,7 @@ class ToxicityModelLoader:
                 "label": "Toxic" if toxic_score > 0.5 else "Clean",
                 "score": round(toxic_score * 100, 1),
             }
-        except Exception as exc:
+        except Exception:
             logger.exception("Error in toxicity prediction")
             return {"label": "Error", "score": 0.0}
 
@@ -199,6 +197,12 @@ class ToxicityModelLoader:
 
     def predict_sentiment(self, text):
         """Return sentiment label, confidence, and class score distribution."""
+        if self.sentiment_model is None:
+            self.sentiment_model = self._load_pipeline(
+                "Sentiment",
+                SENTIMENT_MODEL_ID,
+            )
+
         if not text or len(text.strip()) == 0:
             return {
                 "label": "Neutral",
