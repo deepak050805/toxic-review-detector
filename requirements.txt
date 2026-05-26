@@ -3,7 +3,7 @@ Flask==2.3.3
 gunicorn==21.2.0
 
 # Transformer inference stack
-torch==2.0.1
+torch==2.2.2
 transformers==4.33.0
 numpy==1.24.3
 
