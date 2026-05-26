@@ -2,13 +2,12 @@
  * Guard.AI - Moderation Dashboard Client Controller
  */
 
-console.log("NEW SCRIPT VERSION LOADED");
-
 const config = {
     apiBase: '/api',
     minTextLength: 5,
     maxTextLength: 10000,
-    longInputThreshold: 8000
+    longInputThreshold: 8000,
+    requestTimeoutMs: 90000
 };
 
 let appState = {
@@ -59,6 +58,7 @@ const profanityBar = document.getElementById('profanity-bar');
 const newAnalysisBtn = document.getElementById('new-analysis-btn');
 const downloadReportBtn = document.getElementById('download-report-btn');
 const exampleButtons = document.querySelectorAll('.example-btn');
+const errorCloseBtn = document.querySelector('.error-close');
 
 // Event Listeners
 reviewInput.addEventListener('input', handleTextInput);
@@ -69,12 +69,16 @@ downloadReportBtn.addEventListener('click', handleDownloadReport);
 
 exampleButtons.forEach((btn) => {
     btn.addEventListener('click', (event) => {
-        const exampleNum = event.target.dataset.example;
+        const exampleNum = event.currentTarget.dataset.example;
         reviewInput.value = sampleReviews[exampleNum];
         updateCharCount();
         reviewInput.focus();
     });
 });
+
+if (errorCloseBtn) {
+    errorCloseBtn.addEventListener('click', hideError);
+}
 
 function handleTextInput() {
     updateCharCount();
@@ -99,6 +103,8 @@ function updateCharCount() {
 }
 
 async function handleAnalyze() {
+    if (appState.isAnalyzing) return;
+
     const text = reviewInput.value.trim();
 
     if (text.length < config.minTextLength) {
@@ -118,19 +124,38 @@ async function handleAnalyze() {
     showLoading();
     resultsSection.classList.add('hidden');
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), config.requestTimeoutMs);
+
     try {
         const response = await fetch(`${config.apiBase}/predict`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ text })
+            body: JSON.stringify({ text }),
+            signal: controller.signal
         });
 
-        const result = await response.json();
+        const responseText = await response.text();
+        let result = null;
+        if (responseText.trim()) {
+            try {
+                result = JSON.parse(responseText);
+            } catch (parseError) {
+                console.error('Failed to parse JSON response:', responseText.slice(0, 200));
+                throw new Error(`Invalid server response format. HTTP status: ${response.status}`);
+            }
+        }
 
         if (!response.ok) {
-            throw new Error(result.error || `Request failed with status ${response.status}`);
+            const message = (result && result.error)
+                || `Request failed with status ${response.status}`;
+            throw new Error(message);
+        }
+
+        if (!result) {
+            throw new Error('Server returned an empty response.');
         }
 
         if (!result.success) {
@@ -144,11 +169,17 @@ async function handleAnalyze() {
         displayResults(result, processingTime);
     } catch (error) {
         console.error('Analysis error:', error);
-        showError(error.message || 'Analysis failed. Please try again.');
+        if (error.name === 'AbortError') {
+            showError('Request timed out. Models may still be loading on first run — please wait and try again.');
+        } else {
+            showError(error.message || 'Analysis failed. Please try again.');
+        }
         hideLoading();
     } finally {
+        clearTimeout(timeoutId);
         appState.isAnalyzing = false;
-        analyzeBtn.disabled = false;
+        const length = reviewInput.value.length;
+        analyzeBtn.disabled = !(length >= config.minTextLength && length <= config.maxTextLength);
     }
 }
 
@@ -365,17 +396,16 @@ function updateCharts(result) {
 
     const riskCtx = document.getElementById('riskChart').getContext('2d');
     const sScores = sentiment.scores || {};
-    
+    const positive = Number(sScores.positive) || 0;
+    const neutral = Number(sScores.neutral) || 0;
+    const negative = Number(sScores.negative) || 0;
+
     appState.charts.riskChart = new Chart(riskCtx, {
         type: 'doughnut',
         data: {
             labels: ['Positive', 'Neutral', 'Negative'],
             datasets: [{
-                data: [
-                    sScores.positive || 0,
-                    sScores.neutral || 0,
-                    sScores.negative || 0
-                ],
+                data: [positive, neutral, negative],
                 backgroundColor: [
                     'rgba(16, 185, 129, 0.7)', // green
                     'rgba(245, 158, 11, 0.7)', // amber
@@ -415,12 +445,35 @@ function hideError() {
     errorState.classList.add('hidden');
 }
 
+let statusInterval;
+
 function showLoading() {
     loadingState.classList.remove('hidden');
+    const loadingTextElement = loadingState.querySelector('.loading-text');
+    if (loadingTextElement) {
+        const messages = [
+            "Initializing moderation models...",
+            "Preparing transformer pipelines...",
+            "Running analysis..."
+        ];
+        let step = 0;
+        loadingTextElement.textContent = messages[0];
+
+        clearInterval(statusInterval);
+        statusInterval = setInterval(() => {
+            step = (step + 1) % messages.length;
+            loadingTextElement.textContent = messages[step];
+        }, 4000);
+    }
 }
 
 function hideLoading() {
     loadingState.classList.add('hidden');
+    clearInterval(statusInterval);
+    const loadingTextElement = loadingState.querySelector('.loading-text');
+    if (loadingTextElement) {
+        loadingTextElement.textContent = "Performing neural network analysis...";
+    }
 }
 
 function resetWorkspace({ focusInput = false } = {}) {
@@ -465,9 +518,9 @@ Risk Level:           ${getRiskLevel(result.toxicity.confidence)}
 
 Sentiment Quality:    ${result.sentiment.label} (${result.sentiment.confidence}%)
 Sentiment Scores:
-  - Positive:         ${result.sentiment.scores.positive}%
-  - Neutral:          ${result.sentiment.scores.neutral}%
-  - Negative:         ${result.sentiment.scores.negative}%
+  - Positive:         ${result.sentiment.scores?.positive ?? 0}%
+  - Neutral:          ${result.sentiment.scores?.neutral ?? 0}%
+  - Negative:         ${result.sentiment.scores?.negative ?? 0}%
 
 ==================================================
 DETAILED CATEGORIES PROBABILITY
@@ -492,22 +545,38 @@ End of Guard.AI Compliance Log. processed locally.
     document.body.removeChild(a);
 }
 
-function init() {
-    console.log('Guard.AI Engine initialized.');
+async function parseJsonResponse(response) {
+    const text = await response.text();
+    if (!text.trim()) {
+        return null;
+    }
+    try {
+        return JSON.parse(text);
+    } catch (error) {
+        console.error('Invalid JSON from health endpoint:', text.slice(0, 200));
+        return null;
+    }
+}
+
+async function init() {
     updateCharCount();
 
-    fetch(`${config.apiBase}/health`)
-        .then((res) => res.json())
-        .then((data) => {
-            console.log('Guard.AI Backend health OK', data);
-            if (!data.model_loaded) {
-                showError('Moderation models are warming up in the background. First requests may take a minute.');
-            }
-        })
-        .catch((err) => {
-            console.error('Guard.AI Health check failed', err);
-            showError('Unable to connect to local Guard.AI server. Please verify application runtime.');
-        });
+    try {
+        const response = await fetch(`${config.apiBase}/health`);
+        const data = await parseJsonResponse(response);
+
+        if (!response.ok || !data) {
+            showError('Unable to reach the moderation API. Please verify the server is running.');
+            return;
+        }
+
+        if (!data.model_loaded) {
+            showError('Models are loading in the background. The first analysis may take up to a minute.');
+        }
+    } catch (err) {
+        console.error('Health check failed', err);
+        showError('Unable to connect to the moderation server. Please verify the application is running.');
+    }
 }
 
 if (document.readyState === 'loading') {

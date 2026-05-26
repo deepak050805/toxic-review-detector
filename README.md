@@ -90,7 +90,7 @@ Encoder transformer models are suitable for this application because moderation 
 Configured pipelines:
 
 - `unitary/toxic-bert` for toxicity, identity-hate, insult, and obscene-language signals
-- `lxyuan/distilbert-base-multilingual-cased-sentiments-student` for sentiment classification
+- `distilbert-base-uncased-finetuned-sst-2-english` for sentiment classification
 
 The model layer returns normalized scores on a `0-100` scale. The API uses the toxicity score as the primary confidence value and averages hate speech and abusive-language signals for the harassment category. These values are confidence-style model outputs, not benchmarked accuracy metrics.
 

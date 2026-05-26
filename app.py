@@ -1,18 +1,16 @@
-"""Application entry point for the Toxic Review Detector service.
-
-This module owns the HTTP boundary of the moderation platform. It renders the
-dashboard template, validates API payloads, invokes preprocessing and model
-inference, and returns normalized JSON responses for frontend and API clients.
-"""
+"""Application entry point for the Toxic Review Detector service."""
 
 import logging
 import os
+import threading
 from datetime import datetime
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
-from models.model_loader import get_model, get_model_status
+import models.ml_env  # noqa: F401 — disable TensorFlow before ML imports
+
+from models.model_loader import get_model, get_model_status, ModelLoadError
 from utils.text_processing import TextProcessor
 
 logging.basicConfig(
@@ -26,49 +24,64 @@ app.config['JSON_SORT_KEYS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
-# Models are loaded at process startup so the first prediction request does not
-# need to pay initialization cost. Startup failures are surfaced through API
-# responses instead of crashing the web process.
 try:
     model = get_model()
-    logger.info("NLP models loaded successfully")
-except Exception as exc:
-    logger.exception("Failed to load NLP models")
+    logger.info("NLP models loader initialized successfully")
+except Exception:
+    logger.exception("Failed to initialize NLP models loader")
     model = None
+
+
+def warm_models():
+    """Preload transformer pipelines in the background to reduce first-request latency."""
+    if model is None:
+        return
+    try:
+        logger.info("Background model warmup started (loading models sequentially)...")
+        model._load_models()
+        logger.info("Background model warmup finished successfully")
+    except Exception:
+        logger.exception("Failed to warm up models in background")
+
+
+threading.Thread(target=warm_models, daemon=True, name="model-warmup").start()
 
 text_processor = TextProcessor()
 
 
-def analyze_text(text):
-    """Run the configured moderation models and return normalized scores.
+def _parse_json_body():
+    """Parse JSON bodies without raising HTML 400 pages on malformed input."""
+    return request.get_json(silent=True)
 
-    Toxicity, hate speech, profanity, and insult are scored using unitary/toxic-bert,
-    while sentiment is scored using lxyuan/distilbert-base-multilingual-cased-sentiments-student.
-    """
+
+def _models_unavailable_response():
+    """Return a consistent JSON payload when inference is not ready."""
+    status = get_model_status()
+    message = "Moderation models are still loading. Please retry in a moment."
+    if status.get("load_error"):
+        message = f"Model initialization failed: {status['load_error']}"
+    return jsonify({
+        "success": False,
+        "error": message,
+        "model_status": status,
+    }), 503
+
+
+def analyze_text(text):
+    """Run toxicity (single pass) and sentiment inference on cleaned text."""
     cleaned_text = text_processor.clean_text(text)
-    
-    toxicity = model.predict_toxicity(cleaned_text)
-    hate_speech = model.predict_hate_speech(cleaned_text)
-    profanity = model.predict_profanity(cleaned_text)
-    harassment = model.predict_insult(cleaned_text)
+
+    toxicity_results = model.predict_toxicity_all(cleaned_text)
     sentiment = model.predict_sentiment(cleaned_text)
 
     return {
-        "toxicity": {
-            "label": toxicity['label'],
-            "confidence": toxicity['score']
-        },
+        "toxicity": toxicity_results["toxicity"],
         "sentiment": {
-            "label": sentiment['label'],
-            "confidence": sentiment['confidence'],
-            "scores": sentiment.get('scores', {})
+            "label": sentiment["label"],
+            "confidence": sentiment["confidence"],
+            "scores": sentiment.get("scores", {}),
         },
-        "categories": {
-            "toxicity": toxicity['score'],
-            "hate_speech": hate_speech,
-            "harassment": harassment,
-            "profanity": profanity
-        }
+        "categories": toxicity_results["categories"],
     }
 
 
@@ -94,7 +107,7 @@ def disable_static_cache(response):
 def predict():
     """Analyze one review and return the dashboard/API response payload."""
     try:
-        data = request.get_json()
+        data = _parse_json_body()
 
         if not data:
             return jsonify({
@@ -120,6 +133,9 @@ def predict():
                 "model_status": status,
             }), 500
 
+        if not model.models_ready and model._load_in_progress:
+            return _models_unavailable_response()
+
         response = {
             "success": True,
             **analyze_text(text),
@@ -135,6 +151,15 @@ def predict():
         )
         return jsonify(response), 200
 
+    except ModelLoadError as exc:
+        logger.error("Model load error in prediction: %s", exc)
+        error_msg = str(exc)
+        status_code = 503 if "Timeout" in error_msg else 500
+        return jsonify({
+            "success": False,
+            "error": error_msg
+        }), status_code
+
     except Exception as exc:
         logger.error("Error in prediction: %s", exc, exc_info=True)
         return jsonify({
@@ -147,7 +172,7 @@ def predict():
 def batch_predict():
     """Analyze multiple reviews while preserving the single-item score shape."""
     try:
-        data = request.get_json()
+        data = _parse_json_body()
 
         if not data:
             return jsonify({
@@ -178,6 +203,9 @@ def batch_predict():
                 "model_status": status,
             }), 500
 
+        if not model.models_ready and model._load_in_progress:
+            return _models_unavailable_response()
+
         results = []
         for text in texts:
             normalized_text = str(text).strip()
@@ -187,7 +215,6 @@ def batch_predict():
                 continue
 
             result = analyze_text(normalized_text)
-            # Return a short text preview so batch responses remain compact.
             result["text"] = (
                 f"{normalized_text[:100]}..."
                 if len(normalized_text) > 100
@@ -201,11 +228,20 @@ def batch_predict():
             "results": results
         }), 200
 
+    except ModelLoadError as exc:
+        logger.error("Model load error in batch prediction: %s", exc)
+        error_msg = str(exc)
+        status_code = 503 if "Timeout" in error_msg else 500
+        return jsonify({
+            "success": False,
+            "error": error_msg
+        }), status_code
+
     except Exception as exc:
         logger.error("Error in batch prediction: %s", exc)
         return jsonify({
             "success": False,
-            "error": "Internal server error"
+            "error": f"Internal server error: {str(exc)}"
         }), 500
 
 
@@ -213,9 +249,14 @@ def batch_predict():
 def health():
     """Return service health and model load status."""
     model_status = get_model_status()
+    models_loaded = (
+        model is not None
+        and model.models_ready
+    )
     return jsonify({
-        "status": "healthy" if model is not None else "degraded",
-        "model_loaded": model is not None,
+        "success": True,
+        "status": "healthy" if models_loaded else "degraded",
+        "model_loaded": models_loaded,
         "model_status": model_status,
         "timestamp": datetime.now().isoformat()
     }), 200
@@ -223,12 +264,18 @@ def health():
 
 @app.errorhandler(404)
 def not_found(error):
-    return jsonify({"error": "Not found"}), 404
+    return jsonify({
+        "success": False,
+        "error": "Not found"
+    }), 404
 
 
 @app.errorhandler(500)
 def server_error(error):
-    return jsonify({"error": "Internal server error"}), 500
+    return jsonify({
+        "success": False,
+        "error": "Internal server error"
+    }), 500
 
 
 @app.errorhandler(413)
@@ -237,6 +284,22 @@ def request_too_large(error):
         "success": False,
         "error": "Request payload is too large"
     }), 413
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return jsonify({
+            "success": False,
+            "error": e.description or str(e)
+        }), e.code
+
+    logger.exception("Unhandled exception occurred: %s", e)
+    return jsonify({
+        "success": False,
+        "error": f"Internal server error: {str(e)}"
+    }), 500
 
 
 if __name__ == '__main__':

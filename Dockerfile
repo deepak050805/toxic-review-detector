@@ -22,4 +22,8 @@ ENV FLASK_APP=app.py
 ENV PYTHONUNBUFFERED=1
 
 # Gunicorn provides a production WSGI server around the Flask application.
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "60", "app:app"]
+ENV TOKENIZERS_PARALLELISM=false
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 1 --threads 2 --timeout 90 --graceful-timeout 30 app:app"]

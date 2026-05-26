@@ -1,12 +1,17 @@
+# PyTorch-only moderation stack — do NOT add tensorflow / tensorflow-cpu / tf-keras.
+
 # Web API and server runtime
 Flask==2.3.3
 gunicorn==21.2.0
 
-# Transformer inference stack
+# Core ML (CPU inference)
+numpy==1.26.4
 torch==2.2.2
-transformers==4.33.0
-numpy==1.24.3
+transformers==4.40.2
+tokenizers==0.19.1
+safetensors==0.4.5
+huggingface-hub==0.23.5
 
-# Environment and HTTP utilities
+# Utilities
 requests==2.31.0
 python-dotenv==1.0.0

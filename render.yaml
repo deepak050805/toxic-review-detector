@@ -3,13 +3,22 @@ services:
     name: toxic-review-detector
     env: python
     plan: free
-    # Render installs dependencies, then starts the Flask app behind Gunicorn.
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn -w 2 -b 0.0.0.0:5000 app:app
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 90 --graceful-timeout 30 app:app
     envVars:
       - key: PYTHON_VERSION
-        value: 3.10
+        value: "3.11.9"
       - key: FLASK_ENV
         value: production
-      - key: PORT
-        value: 5000
+      - key: TRANSFORMERS_NO_TF
+        value: "1"
+      - key: USE_TF
+        value: "0"
+      - key: USE_TORCH
+        value: "1"
+      - key: TOKENIZERS_PARALLELISM
+        value: "false"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
