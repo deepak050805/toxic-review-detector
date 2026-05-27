@@ -6,6 +6,7 @@ import os
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from datetime import datetime
 from pathlib import Path
 
@@ -28,6 +29,9 @@ app = Flask(__name__)
 app.config['JSON_SORT_KEYS'] = False
 app.config['MAX_CONTENT_LENGTH'] = 2 * 1024 * 1024
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+# Inference timeout (seconds) for long-running model calls. Keep below Gunicorn timeout.
+INFERENCE_TIMEOUT_SEC = int(os.environ.get('INFERENCE_TIMEOUT_SEC', '150'))  # default 150s
 
 try:
     model = get_model()
@@ -252,7 +256,35 @@ def _predict_impl():
     if not model.models_ready and model._load_in_progress:
         return _models_unavailable_response()
 
-    result = analyze_text(text)
+    # Structured logging: request start
+    logger.info("/api/predict request start; text_len=%d", len(text))
+    _log_event("predict_request_started", hypothesis_id="H2", text_len=len(text))
+
+    # Run inference in a thread with a timeout to avoid blocking Gunicorn worker
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(analyze_text, text)
+            try:
+                result = future.result(timeout=INFERENCE_TIMEOUT_SEC)
+            except FutureTimeout:
+                _log_event("inference_timeout", hypothesis_id="H2", text_len=len(text))
+                logger.warning("Inference timed out after %s seconds", INFERENCE_TIMEOUT_SEC)
+                return _json_error(
+                    "Inference timed out. Models may still be loading or the request is too large.",
+                    status_code=503,
+                    error_type="inference_timeout",
+                    extra={"model_status": get_model_status()},
+                )
+    except ModelLoadError as mle:
+        _log_event("predict_model_load_error", hypothesis_id="H2", error=str(mle))
+        logger.exception("Model load error during predict: %s", mle)
+        return _json_error(str(mle), status_code=503, error_type="model_load", extra={"model_status": get_model_status()})
+    except Exception as exc:
+        _log_event("predict_inference_exception", hypothesis_id="H2", error=str(exc))
+        logger.exception("Unhandled exception during inference: %s", exc)
+        return _json_error(f"Inference failed: {exc}", status_code=500, error_type="inference_error", extra={"model_status": get_model_status()})
+
+    # Build safe response
     response = {
         "success": True,
         "toxicity": result.get("toxicity", {"label": "Unknown", "confidence": 0}),
@@ -277,6 +309,7 @@ def _predict_impl():
         response["sentiment"]["label"],
         response["sentiment"]["confidence"],
     )
+    _log_event("predict_completed", hypothesis_id="H2", toxicity_label=response["toxicity"]["label"], sentiment_label=response["sentiment"]["label"])
     out = jsonify(response)
     out.headers["Content-Type"] = "application/json; charset=utf-8"
     return out, 200

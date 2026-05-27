@@ -23,7 +23,7 @@ TOXICITY_MODEL_ID = "martin-ha/toxic-comment-model"
 SENTIMENT_MODEL_ID = "distilbert-base-uncased-finetuned-sst-2-english"
 
 MAX_INFERENCE_CHARS = 512
-LOAD_LOCK_TIMEOUT_SEC = 90.0
+LOAD_LOCK_TIMEOUT_SEC = 120.0  # Increased timeout for slow Render networks
 
 
 class ModelLoadError(RuntimeError):
@@ -158,41 +158,56 @@ class ToxicityModelLoader:
             raise ModelLoadError(f"{label} model failed to load: {exc}") from exc
 
     def _load_models(self):
-        """Load all pipelines sequentially while holding the process lock."""
+        """Load all pipelines sequentially with independent locking per model."""
         logger.info("Starting transformer moderation pipeline initialization")
         logger.info("PyTorch version: %s", torch.__version__)
         logger.info("Proxy blocked: %s", has_blackhole_proxy())
 
-        with self._lock:
-            self._load_in_progress = True
-            try:
-                if self.toxicity_model is None:
-                    self.toxicity_model = self._load_pipeline("Toxicity", TOXICITY_MODEL_ID)
-                if self.sentiment_model is None:
-                    self.sentiment_model = self._load_pipeline("Sentiment", SENTIMENT_MODEL_ID)
-            finally:
-                self._load_in_progress = False
+        # Load toxicity independently
+        try:
+            if self.toxicity_model is None:
+                self.toxicity_model = self._load_pipeline("Toxicity", TOXICITY_MODEL_ID)
+        except Exception as exc:
+            logger.exception("Failed to load toxicity model: %s", exc)
+            raise
+
+        # Load sentiment independently
+        try:
+            if self.sentiment_model is None:
+                self.sentiment_model = self._load_pipeline("Sentiment", SENTIMENT_MODEL_ID)
+        except Exception as exc:
+            logger.exception("Failed to load sentiment model: %s", exc)
+            raise
 
         logger.info("All transformer moderation pipelines loaded successfully")
 
     def _ensure_pipeline(self, attr_name, label, model_id):
-        """Load a single pipeline with timeout-safe double-checked locking (fast-path)."""
-        # Fast path: already loaded, no lock needed
+        """Load a single pipeline with Render-safe timeout and deadlock prevention."""
+        # Fast path: already loaded, return immediately
         if getattr(self, attr_name) is not None:
             return
 
-        # Slow path: acquire lock for initialization
+        # Only one thread should attempt to load this pipeline
         acquired = self._lock.acquire(timeout=LOAD_LOCK_TIMEOUT_SEC)
         if not acquired:
             raise ModelLoadError(
-                f"Timeout waiting for {label} model loading to complete "
-                f"(exceeded {LOAD_LOCK_TIMEOUT_SEC}s)."
+                f"Timeout acquiring lock for {label} (exceeded {LOAD_LOCK_TIMEOUT_SEC}s). "
+                f"Model may still be initializing. Please retry."
             )
 
         try:
             # Double-check: another thread may have loaded while we waited
             if getattr(self, attr_name) is None:
-                setattr(self, attr_name, self._load_pipeline(label, model_id))
+                self._load_in_progress = True
+                try:
+                    logger.info("[%s] Loading model %s from network...", label, model_id)
+                    setattr(self, attr_name, self._load_pipeline(label, model_id))
+                    logger.info("[%s] Successfully loaded and cached", label)
+                except Exception as load_err:
+                    logger.exception("[%s] Pipeline load failed: %s", label, load_err)
+                    raise ModelLoadError(f"{label} load failed: {load_err}") from load_err
+                finally:
+                    self._load_in_progress = False
         finally:
             self._lock.release()
 
