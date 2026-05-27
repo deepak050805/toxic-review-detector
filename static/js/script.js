@@ -1,5 +1,6 @@
 /**
  * Guard.AI - Moderation Dashboard Client Controller
+ * Production-hardened with error recovery and timeout handling.
  */
 
 const config = {
@@ -7,14 +8,17 @@ const config = {
     minTextLength: 5,
     maxTextLength: 10000,
     longInputThreshold: 8000,
-    requestTimeoutMs: 90000
+    requestTimeoutMs: 120000,  // Increased to 120s for first-run model loading
+    healthCheckIntervalMs: 15000  // Check server health every 15s during init
 };
 
 let appState = {
     isAnalyzing: false,
     currentResult: null,
     analysisStartTime: null,
-    charts: {}
+    charts: {},
+    requestAttempts: 0,
+    maxRequestAttempts: 1  // Single attempt per user request (retries managed via UI prompt)
 };
 
 const sampleReviews = {
@@ -113,12 +117,13 @@ async function handleAnalyze() {
     }
 
     if (text.length > config.maxTextLength) {
-        showError('Large moderation payload detected. Please shorten the content before analysis.');
+        showError('Content exceeds the 10,000 character safety limit. Please shorten the text.');
         return;
     }
 
     appState.isAnalyzing = true;
     appState.analysisStartTime = performance.now();
+    appState.requestAttempts = 0;
     analyzeBtn.disabled = true;
     hideError();
     showLoading();
@@ -137,29 +142,51 @@ async function handleAnalyze() {
             signal: controller.signal
         });
 
-        const responseText = await response.text();
+        // Always try to read response as text first to avoid parsing errors
+        let responseText = '';
+        try {
+            responseText = await response.text();
+        } catch (readErr) {
+            console.error('Failed to read response body:', readErr);
+            throw new Error('Failed to read server response');
+        }
+
+        // Try to parse JSON, but handle empty responses gracefully
         let result = null;
-        if (responseText.trim()) {
+        if (responseText && responseText.trim()) {
             try {
                 result = JSON.parse(responseText);
             } catch (parseError) {
-                console.error('Failed to parse JSON response:', responseText.slice(0, 200));
-                throw new Error(`Invalid server response format. HTTP status: ${response.status}`);
+                console.error('JSON parse error:', {
+                    statusCode: response.status,
+                    responseLength: responseText.length,
+                    firstChars: responseText.slice(0, 200)
+                });
+                throw new Error(`Server returned invalid response (status ${response.status}). Please try again.`);
             }
         }
 
+        // Check HTTP status before validating result content
         if (!response.ok) {
-            const message = (result && result.error)
-                || `Request failed with status ${response.status}`;
-            throw new Error(message);
+            // Try to extract error message from parsed result
+            const errorMsg = (result && result.error) 
+                ? result.error
+                : `Request failed with status ${response.status}`;
+            throw new Error(errorMsg);
         }
 
+        // Ensure result exists and has valid structure
         if (!result) {
-            throw new Error('Server returned an empty response.');
+            throw new Error('Server returned an empty response. Please retry.');
         }
 
-        if (!result.success) {
-            throw new Error(result.error || 'Moderation analysis failed.');
+        if (result.success === false) {
+            throw new Error(result.error || 'Analysis failed. Please try again.');
+        }
+
+        // Validate result structure before displaying
+        if (!validateResultStructure(result)) {
+            throw new Error('Server returned incomplete data. Please retry.');
         }
 
         const processingTime = performance.now() - appState.analysisStartTime;
@@ -169,11 +196,15 @@ async function handleAnalyze() {
         displayResults(result, processingTime);
     } catch (error) {
         console.error('Analysis error:', error);
+        let userMessage = error.message || 'Analysis failed. Please try again.';
+
         if (error.name === 'AbortError') {
-            showError('Request timed out. Models may still be loading on first run — please wait and try again.');
-        } else {
-            showError(error.message || 'Analysis failed. Please try again.');
+            userMessage = 'Request timed out. Models may still be loading on first run — please wait 30-60 seconds and try again.';
+        } else if (error.message && error.message.includes('Failed to fetch')) {
+            userMessage = 'Unable to reach the server. Please verify your connection and try again.';
         }
+
+        showError(userMessage);
         hideLoading();
     } finally {
         clearTimeout(timeoutId);
@@ -183,50 +214,86 @@ async function handleAnalyze() {
     }
 }
 
+function validateResultStructure(result) {
+    // Ensure all required fields exist with proper types
+    if (!result.toxicity || typeof result.toxicity.confidence !== 'number') return false;
+    if (!result.sentiment || typeof result.sentiment.confidence !== 'number') return false;
+    if (!result.categories) return false;
+    if (typeof result.categories.toxicity !== 'number') return false;
+    if (typeof result.categories.hate_speech !== 'number') return false;
+    if (typeof result.categories.harassment !== 'number') return false;
+    if (typeof result.categories.profanity !== 'number') return false;
+    return true;
+}
+
 function displayResults(result, processingTime) {
-    const isToxic = result.toxicity.label === 'Toxic';
-    const confidence = result.toxicity.confidence;
-    const sentiment = result.sentiment;
+    // Safely extract and validate data with fallbacks
+    const isToxic = result.toxicity && result.toxicity.label === 'Toxic';
+    const confidence = Math.max(0, Math.min(100, result.toxicity?.confidence || 0));
+    const sentiment = result.sentiment || { label: 'Neutral', confidence: 0, scores: {} };
 
     // 1. Update Toxicity Badge
     resultLabel.textContent = isToxic ? 'Flagged' : 'Safe';
     resultLabel.className = `badge ${isToxic ? 'toxic' : 'safe'}`;
 
-    // 2. Update Sentiment Badge
-    sentimentBadge.textContent = sentiment.label;
-    const sentClass = sentiment.label.toLowerCase();
-    sentimentBadge.className = `badge ${sentClass === 'positive' ? 'positive' : sentClass === 'negative' ? 'negative' : 'neutral'}`;
+    // 2. Update Sentiment Badge with safe fallback
+    const sentimentLabel = (sentiment.label || 'Neutral').toLowerCase();
+    sentimentBadge.textContent = (sentiment.label || 'Neutral').charAt(0).toUpperCase() + sentimentLabel.slice(1);
+    const sentClass = sentimentLabel === 'positive' ? 'positive' 
+                    : sentimentLabel === 'negative' ? 'negative' 
+                    : 'neutral';
+    sentimentBadge.className = `badge ${sentClass}`;
 
     // 3. Overall Risk Meter Ring
     confidenceScore.textContent = `${Math.round(confidence)}%`;
     animateCircularProgress(confidence, isToxic);
 
-    // 4. Stats Table
+    // 4. Stats Table with safe defaults
     infoStatus.textContent = isToxic ? 'Action Required' : 'Approved';
     infoStatus.className = `info-value ${isToxic ? 'badge toxic' : 'badge safe'}`;
     infoStatus.style.display = 'inline-flex';
     
     infoRisk.textContent = getRiskLevel(confidence);
     infoTime.textContent = `${Math.round(processingTime)}ms`;
-    sentimentScoreInfo.textContent = `${sentiment.label} (${Math.round(sentiment.confidence)}%)`;
+    
+    const sentimentConfidence = Math.max(0, Math.min(100, sentiment.confidence || 0));
+    sentimentScoreInfo.textContent = `${sentiment.label || 'Neutral'} (${Math.round(sentimentConfidence)}%)`;
 
-    // 5. Individual category bars
-    animateValue(toxicityScore, result.categories.toxicity);
-    animateValue(hateSpeechScore, result.categories.hate_speech);
-    animateValue(harassmentScore, result.categories.harassment);
-    animateValue(profanityScore, result.categories.profanity);
+    // 5. Individual category bars with safe access
+    const categories = result.categories || {
+        toxicity: 0,
+        hate_speech: 0,
+        harassment: 0,
+        profanity: 0
+    };
 
-    animateProgress(toxicityBar, result.categories.toxicity);
-    animateProgress(hateSpeechBar, result.categories.hate_speech);
-    animateProgress(harassmentBar, result.categories.harassment);
-    animateProgress(profanityBar, result.categories.profanity);
+    const toxScore = Math.max(0, Math.min(100, categories.toxicity || 0));
+    const hateScore = Math.max(0, Math.min(100, categories.hate_speech || 0));
+    const harassScore = Math.max(0, Math.min(100, categories.harassment || 0));
+    const profScore = Math.max(0, Math.min(100, categories.profanity || 0));
+
+    animateValue(toxicityScore, toxScore);
+    animateValue(hateSpeechScore, hateScore);
+    animateValue(harassmentScore, harassScore);
+    animateValue(profanityScore, profScore);
+
+    animateProgress(toxicityBar, toxScore);
+    animateProgress(hateSpeechBar, hateScore);
+    animateProgress(harassmentBar, harassScore);
+    animateProgress(profanityBar, profScore);
 
     // Show Results Panel
     resultsSection.classList.remove('hidden');
     
-    // Initialize/Render Charts
-    updateCharts(result);
+    // Initialize/Render Charts with error recovery
+    try {
+        updateCharts(result);
+    } catch (chartErr) {
+        console.error('Chart rendering error:', chartErr);
+        // Don't fail the whole result display due to chart issues
+    }
 
+    // Scroll to results smoothly
     setTimeout(() => {
         resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }, 150);
@@ -320,120 +387,164 @@ function easeOutCubic(t) {
 }
 
 function updateCharts(result) {
-    const categories = result.categories;
-    const sentiment = result.sentiment;
+    const categories = result.categories || {
+        toxicity: 0,
+        hate_speech: 0,
+        harassment: 0,
+        profanity: 0
+    };
+    const sentiment = result.sentiment || { scores: {} };
 
     // Destroy existing instances before redraw
     if (appState.charts.categoryChart) {
-        appState.charts.categoryChart.destroy();
+        try {
+            appState.charts.categoryChart.destroy();
+        } catch (e) {
+            console.warn('Error destroying category chart:', e);
+        }
     }
 
     if (appState.charts.riskChart) {
-        appState.charts.riskChart.destroy();
+        try {
+            appState.charts.riskChart.destroy();
+        } catch (e) {
+            console.warn('Error destroying risk chart:', e);
+        }
     }
 
-    const categoryCtx = document.getElementById('categoryChart').getContext('2d');
-    appState.charts.categoryChart = new Chart(categoryCtx, {
-        type: 'bar',
-        data: {
-            labels: ['Toxicity', 'Hate Speech', 'Harassment', 'Profanity'],
-            datasets: [{
-                data: [
-                    categories.toxicity,
-                    categories.hate_speech,
-                    categories.harassment,
-                    categories.profanity
-                ],
-                backgroundColor: [
-                    'rgba(239, 68, 68, 0.45)',  // red
-                    'rgba(245, 158, 11, 0.45)',  // amber
-                    'rgba(168, 85, 247, 0.45)',  // purple
-                    'rgba(14, 165, 233, 0.45)'   // cyan
-                ],
-                borderColor: [
-                    '#ef4444',
-                    '#f59e0b',
-                    '#a855f7',
-                    '#0ea5e9'
-                ],
-                borderWidth: 1.5,
-                borderRadius: 4,
-                borderSkipped: false
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            plugins: {
-                legend: {
-                    display: false
-                }
+    // Safely get canvas contexts
+    const categoryCanvas = document.getElementById('categoryChart');
+    const riskCanvas = document.getElementById('riskChart');
+    
+    if (!categoryCanvas || !riskCanvas) {
+        console.warn('Chart canvases not found');
+        return;
+    }
+
+    const categoryCtx = categoryCanvas.getContext('2d');
+    if (!categoryCtx) {
+        console.warn('Failed to get category chart context');
+        return;
+    }
+
+    try {
+        appState.charts.categoryChart = new Chart(categoryCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Toxicity', 'Hate Speech', 'Harassment', 'Profanity'],
+                datasets: [{
+                    data: [
+                        Math.max(0, Math.min(100, categories.toxicity || 0)),
+                        Math.max(0, Math.min(100, categories.hate_speech || 0)),
+                        Math.max(0, Math.min(100, categories.harassment || 0)),
+                        Math.max(0, Math.min(100, categories.profanity || 0))
+                    ],
+                    backgroundColor: [
+                        'rgba(239, 68, 68, 0.45)',
+                        'rgba(245, 158, 11, 0.45)',
+                        'rgba(168, 85, 247, 0.45)',
+                        'rgba(14, 165, 233, 0.45)'
+                    ],
+                    borderColor: [
+                        '#ef4444',
+                        '#f59e0b',
+                        '#a855f7',
+                        '#0ea5e9'
+                    ],
+                    borderWidth: 1.5,
+                    borderRadius: 4,
+                    borderSkipped: false
+                }]
             },
-            scales: {
-                y: {
-                    beginAtZero: true,
-                    max: 100,
-                    ticks: {
-                        color: '#64748b',
-                        font: { family: "'Inter', sans-serif", size: 10 }
-                    },
-                    grid: {
-                        color: 'rgba(255, 255, 255, 0.04)'
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: {
+                        display: false
                     }
                 },
-                x: {
-                    ticks: {
-                        color: '#94a3b8',
-                        font: { family: "'Inter', sans-serif", size: 11, weight: '500' }
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        ticks: {
+                            color: '#64748b',
+                            font: { family: "'Inter', sans-serif", size: 10 }
+                        },
+                        grid: {
+                            color: 'rgba(255, 255, 255, 0.04)'
+                        }
                     },
-                    grid: {
-                        display: false
+                    x: {
+                        ticks: {
+                            color: '#94a3b8',
+                            font: { family: "'Inter', sans-serif", size: 11, weight: '500' }
+                        },
+                        grid: {
+                            display: false
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    } catch (err) {
+        console.error('Error creating category chart:', err);
+    }
 
-    const riskCtx = document.getElementById('riskChart').getContext('2d');
+    const riskCtx = riskCanvas.getContext('2d');
+    if (!riskCtx) {
+        console.warn('Failed to get risk chart context');
+        return;
+    }
+
     const sScores = sentiment.scores || {};
     const positive = Number(sScores.positive) || 0;
     const neutral = Number(sScores.neutral) || 0;
     const negative = Number(sScores.negative) || 0;
 
-    appState.charts.riskChart = new Chart(riskCtx, {
-        type: 'doughnut',
-        data: {
-            labels: ['Positive', 'Neutral', 'Negative'],
-            datasets: [{
-                data: [positive, neutral, negative],
-                backgroundColor: [
-                    'rgba(16, 185, 129, 0.7)', // green
-                    'rgba(245, 158, 11, 0.7)', // amber
-                    'rgba(239, 68, 68, 0.7)'  // red
-                ],
-                borderColor: '#0b0f19',
-                borderWidth: 3
-            }]
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            cutout: '65%',
-            plugins: {
-                legend: {
-                    position: 'right',
-                    labels: {
-                        color: '#94a3b8',
-                        font: { family: "'Inter', sans-serif", size: 11 },
-                        padding: 12,
-                        boxWidth: 8,
-                        boxHeight: 8,
-                        usePointStyle: true
+    try {
+        appState.charts.riskChart = new Chart(riskCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Positive', 'Neutral', 'Negative'],
+                datasets: [{
+                    data: [
+                        Math.max(0, Math.min(100, positive)),
+                        Math.max(0, Math.min(100, neutral)),
+                        Math.max(0, Math.min(100, negative))
+                    ],
+                    backgroundColor: [
+                        'rgba(16, 185, 129, 0.7)',
+                        'rgba(245, 158, 11, 0.7)',
+                        'rgba(239, 68, 68, 0.7)'
+                    ],
+                    borderColor: '#0b0f19',
+                    borderWidth: 3
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                cutout: '65%',
+                plugins: {
+                    legend: {
+                        position: 'right',
+                        labels: {
+                            color: '#94a3b8',
+                            font: { family: "'Inter', sans-serif", size: 11 },
+                            padding: 12,
+                            boxWidth: 8,
+                            boxHeight: 8,
+                            usePointStyle: true
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    } catch (err) {
+        console.error('Error creating risk chart:', err);
+    }
 }
 
 function showError(message) {
@@ -547,13 +658,17 @@ End of Guard.AI Compliance Log. processed locally.
 
 async function parseJsonResponse(response) {
     const text = await response.text();
-    if (!text.trim()) {
+    if (!text || !text.trim()) {
         return null;
     }
     try {
         return JSON.parse(text);
     } catch (error) {
-        console.error('Invalid JSON from health endpoint:', text.slice(0, 200));
+        console.error('Invalid JSON response:', {
+            statusCode: response.status,
+            length: text.length,
+            preview: text.slice(0, 200)
+        });
         return null;
     }
 }
@@ -562,20 +677,43 @@ async function init() {
     updateCharCount();
 
     try {
-        const response = await fetch(`${config.apiBase}/health`);
+        const response = await fetch(`${config.apiBase}/health`, {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+        });
         const data = await parseJsonResponse(response);
 
         if (!response.ok || !data) {
-            showError('Unable to reach the moderation API. Please verify the server is running.');
+            console.warn('Health check failed:', {
+                status: response.status,
+                hasData: !!data
+            });
+            showError('Unable to reach the moderation API. Attempting to reconnect...');
+            
+            // Retry health check after delay
+            setTimeout(() => {
+                fetch(`${config.apiBase}/health`)
+                    .then(r => parseJsonResponse(r))
+                    .then(d => {
+                        if (d && d.model_loaded) {
+                            hideError();
+                        } else if (d && !d.model_loaded) {
+                            showError('Models are loading in the background. The first analysis may take 30-60 seconds.');
+                        }
+                    })
+                    .catch(() => {
+                        console.error('Reconnection failed');
+                    });
+            }, 3000);
             return;
         }
 
         if (!data.model_loaded) {
-            showError('Models are loading in the background. The first analysis may take up to a minute.');
+            showError('Models are loading in the background. First analysis may take 30-60 seconds.');
         }
     } catch (err) {
-        console.error('Health check failed', err);
-        showError('Unable to connect to the moderation server. Please verify the application is running.');
+        console.error('Health check exception:', err);
+        showError('Unable to connect to moderation server. Please verify the application is running.');
     }
 }
 

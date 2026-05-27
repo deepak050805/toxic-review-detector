@@ -110,7 +110,8 @@ class ToxicityModelLoader:
             "models": {},
             "load_error": None,
         }
-        logger.info("Lazy loading enabled for transformer pipelines (CPU-only)")
+        logger.info("Lazy loading enabled for transformer pipelines (CPU-only). "
+                    "First inference request will trigger model initialization.")
 
     @property
     def models_ready(self):
@@ -175,27 +176,33 @@ class ToxicityModelLoader:
         logger.info("All transformer moderation pipelines loaded successfully")
 
     def _ensure_pipeline(self, attr_name, label, model_id):
-        """Load a single pipeline with timeout-safe double-checked locking."""
+        """Load a single pipeline with timeout-safe double-checked locking (fast-path)."""
+        # Fast path: already loaded, no lock needed
         if getattr(self, attr_name) is not None:
             return
 
+        # Slow path: acquire lock for initialization
         acquired = self._lock.acquire(timeout=LOAD_LOCK_TIMEOUT_SEC)
         if not acquired:
             raise ModelLoadError(
-                f"Timeout waiting for {label} model loading to complete."
+                f"Timeout waiting for {label} model loading to complete "
+                f"(exceeded {LOAD_LOCK_TIMEOUT_SEC}s)."
             )
 
         try:
+            # Double-check: another thread may have loaded while we waited
             if getattr(self, attr_name) is None:
                 setattr(self, attr_name, self._load_pipeline(label, model_id))
         finally:
             self._lock.release()
 
     def _run_inference(self, pipe, text):
-        """Run one forward pass with inference mode enabled."""
+        """Run one forward pass with inference mode enabled and memory safety."""
         snippet = text[:MAX_INFERENCE_CHARS]
+        # Ensure we're in inference mode to reduce memory and disable gradients
         with torch.inference_mode():
-            output = pipe(snippet)
+            with torch.no_grad():
+                output = pipe(snippet)
         return output[0] if output else []
 
     def predict_toxicity_all(self, text):

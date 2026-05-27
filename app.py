@@ -39,6 +39,11 @@ except Exception:
 
 # region agent log
 def _agent_log(hypothesis_id, location, message, data=None, run_id="run1"):
+    """Asynchronously log events for debugging without blocking inference."""
+    # Only write debug logs in non-production environments to reduce latency
+    if os.environ.get('FLASK_ENV') == 'production':
+        return  # Skip disk I/O in production
+    
     payload = {
         "sessionId": "6cebb5",
         "hypothesisId": hypothesis_id,
@@ -52,7 +57,7 @@ def _agent_log(hypothesis_id, location, message, data=None, run_id="run1"):
         with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(payload) + "\n")
     except OSError:
-        pass
+        pass  # Silently ignore I/O errors to avoid blocking inference
 # endregion
 
 
@@ -65,10 +70,10 @@ def _log_event(event, hypothesis_id="H0", **fields):
 
 
 def _json_error(message, status_code=500, error_type="internal_error", extra=None):
-    """Always return a non-empty JSON error body."""
+    """Always return a non-empty, structured JSON error body."""
     body = {
         "success": False,
-        "error": message or "Internal server error",
+        "error": str(message) if message else "Internal server error",
         "error_type": error_type,
         "timestamp": datetime.now().isoformat(),
     }
@@ -76,7 +81,7 @@ def _json_error(message, status_code=500, error_type="internal_error", extra=Non
         body.update(extra)
     response = jsonify(body)
     response.status_code = status_code
-    response.headers["Content-Type"] = "application/json"
+    response.headers["Content-Type"] = "application/json; charset=utf-8"
     return response
 
 
@@ -247,9 +252,21 @@ def _predict_impl():
     if not model.models_ready and model._load_in_progress:
         return _models_unavailable_response()
 
+    result = analyze_text(text)
     response = {
         "success": True,
-        **analyze_text(text),
+        "toxicity": result.get("toxicity", {"label": "Unknown", "confidence": 0}),
+        "sentiment": {
+            "label": result.get("sentiment", {}).get("label", "Unknown"),
+            "confidence": result.get("sentiment", {}).get("confidence", 0),
+            "scores": result.get("sentiment", {}).get("scores", {}),
+        },
+        "categories": result.get("categories", {
+            "toxicity": 0,
+            "hate_speech": 0,
+            "harassment": 0,
+            "profanity": 0,
+        }),
         "timestamp": datetime.now().isoformat(),
     }
 
@@ -261,7 +278,7 @@ def _predict_impl():
         response["sentiment"]["confidence"],
     )
     out = jsonify(response)
-    out.headers["Content-Type"] = "application/json"
+    out.headers["Content-Type"] = "application/json; charset=utf-8"
     return out, 200
 
 
@@ -277,10 +294,10 @@ def batch_predict():
         texts = data.get('texts', [])
 
         if not texts or not isinstance(texts, list):
-            return _json_error("Invalid texts format", status_code=400, error_type="validation")
+            return _json_error("Invalid texts format (expected list)", status_code=400, error_type="validation")
 
         if len(texts) > 100:
-            return _json_error("Maximum 100 texts per batch", status_code=400, error_type="validation")
+            return _json_error("Maximum 100 texts per batch request", status_code=400, error_type="validation")
 
         if model is None:
             status = get_model_status()
@@ -295,23 +312,37 @@ def batch_predict():
             return _models_unavailable_response()
 
         results = []
-        for text in texts:
-            normalized_text = str(text).strip()
+        skipped = 0
+        
+        for idx, text in enumerate(texts):
+            normalized_text = str(text).strip() if text else ""
             is_valid, _ = text_processor.validate_text(normalized_text)
 
             if not is_valid:
+                skipped += 1
                 continue
 
-            result = analyze_text(normalized_text)
-            result["text"] = (
-                f"{normalized_text[:100]}..."
-                if len(normalized_text) > 100
-                else normalized_text
-            )
-            results.append(result)
+            try:
+                result = analyze_text(normalized_text)
+                result["text"] = (
+                    f"{normalized_text[:100]}..."
+                    if len(normalized_text) > 100
+                    else normalized_text
+                )
+                results.append(result)
+            except Exception as item_err:
+                logger.warning(f"Error processing batch item {idx}: {item_err}")
+                skipped += 1
+                continue
 
-        out = jsonify({"success": True, "count": len(results), "results": results})
-        out.headers["Content-Type"] = "application/json"
+        out = jsonify({
+            "success": True,
+            "count": len(results),
+            "skipped": skipped,
+            "results": results,
+            "timestamp": datetime.now().isoformat(),
+        })
+        out.headers["Content-Type"] = "application/json; charset=utf-8"
         return out, 200
 
     except MemoryError as exc:
@@ -331,7 +362,7 @@ def batch_predict():
     except Exception as exc:
         logger.exception("Error in batch prediction: %s", exc)
         return _json_error(
-            f"Internal server error: {exc}",
+            f"Batch processing error: {exc}",
             status_code=500,
             error_type="inference_error",
         )
@@ -346,10 +377,11 @@ def health():
         "success": True,
         "status": "healthy" if models_loaded else "degraded",
         "model_loaded": models_loaded,
+        "model_warming": model._load_in_progress if model else False,
         "model_status": model_status,
         "timestamp": datetime.now().isoformat(),
     })
-    out.headers["Content-Type"] = "application/json"
+    out.headers["Content-Type"] = "application/json; charset=utf-8"
     return out, 200
 
 

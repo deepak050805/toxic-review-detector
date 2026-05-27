@@ -19,31 +19,37 @@ class TextProcessor:
         if not text:
             return ""
         
-        # URLs and emails are removed because they add noise to moderation
-        # scoring while often carrying little useful semantic context.
+        # Remove URLs and email addresses as they add noise and minimal semantic value
         text = re.sub(r'http\S+|www\S+|https\S+', '', text, flags=re.MULTILINE)
-        
         text = re.sub(r'\S+@\S+', '', text)
         
+        # Normalize whitespace: collapse multiple spaces, tabs, newlines
         text = re.sub(r'\s+', ' ', text)
         
+        # Strip leading/trailing whitespace
         text = text.strip()
         
         return text
     
     @staticmethod
     def validate_text(text, min_length=5, max_length=10000):
-        """Return a validation tuple used directly by API error responses."""
+        """Return a validation tuple (is_valid, error_message).
+        
+        Used directly by API error responses to ensure frontend/backend
+        validation consistency. Both layers use the same limits.
+        """
         if not text:
-            return False, "Text cannot be empty"
+            return False, "Text cannot be empty."
         
+        # Strip whitespace for length validation
         text = text.strip()
+        text_length = len(text)
         
-        if len(text) < min_length:
-            return False, f"Text must be at least {min_length} characters"
+        if text_length < min_length:
+            return False, f"Text must be at least {min_length} characters (you have {text_length})."
         
-        if len(text) > max_length:
-            return False, f"Text exceeds the {max_length:,} character safety limit"
+        if text_length > max_length:
+            return False, f"Text exceeds the {max_length:,} character safety limit (you have {text_length:,})."
         
         return True, ""
     
@@ -80,3 +86,4 @@ class TextProcessor:
 def get_text_processor():
     """Return a new text processor instance."""
     return TextProcessor()
+
